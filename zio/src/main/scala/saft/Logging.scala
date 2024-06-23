@@ -2,11 +2,14 @@ package saft
 
 import zio.*
 import zio.ZIOAppDefault
-import zio.logging.{LogColor, LogFormat, console, file}
+import zio.logging.LogColor
+import zio.logging.LogFormat
 import zio.logging.LogFormat.*
+import zio.logging.console
+import zio.logging.file
 
 import java.nio.file.Paths
-import java.time.format.{DateTimeFormatter, FormatStyle}
+import java.time.format.DateTimeFormatter
 
 private val RoleLogAnnotation = "role"
 private val NodeIdLogAnnotation = "nodeId"

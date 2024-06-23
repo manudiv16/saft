@@ -8,7 +8,6 @@ import zhttp.http.*
 import zhttp.service.Server
 import zio.json.internal.Write
 
-import java.io.File
 import java.nio.file.{Files, Path as JPath}
 
 object SaftHttp1 extends SaftHttp(1, JPath.of("saft1.json"))

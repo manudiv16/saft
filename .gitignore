@@ -35,3 +35,10 @@ classes/
 
 # Visual Studio Code
 .vscode
+
+# Test files
+saft*.json
+
+# Metals
+.metals/
+metals.sbt

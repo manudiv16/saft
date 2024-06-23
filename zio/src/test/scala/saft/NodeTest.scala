@@ -4,8 +4,6 @@ import zio.*
 import zio.logging.console
 import zio.test.*
 
-import java.nio.file.Paths
-
 object NodeTest extends ZIOSpecDefault:
   override val bootstrap: ZLayer[Scope, Any, TestEnvironment] =
     Runtime.removeDefaultLoggers >>> console(Logging.logFormat, LogLevel.Debug) >>> testEnvironment

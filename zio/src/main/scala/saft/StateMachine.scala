@@ -1,6 +1,6 @@
 package saft
 
-import zio.{Enqueue, Queue, UIO}
+import zio.{Queue, UIO}
 
 /** The state machine to which committed log entries are applied. */
 trait StateMachine:

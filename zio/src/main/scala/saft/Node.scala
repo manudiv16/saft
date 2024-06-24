@@ -1,16 +1,8 @@
 package saft
 
-import zio.{Exit, Fiber, Promise, UIO, ZIO}
+import zio.{ Fiber, Promise, UIO, ZIO}
 
 import scala.annotation.tailrec
-
-private enum NodeRole:
-  def state: ServerState
-  def timer: Timer
-
-  case Follower(state: ServerState, followerState: FollowerState, timer: Timer) extends NodeRole
-  case Candidate(state: ServerState, candidateState: CandidateState, timer: Timer) extends NodeRole
-  case Leader(state: ServerState, leaderState: LeaderState, timer: Timer) extends NodeRole
 
 /** A Raft node. Communicates with the outside world using [[comms]]. Committed logs are applied to [[stateMachine]]. */
 class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf, persistence: Persistence) {
@@ -47,14 +39,36 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
   private def handleEvent(event: ServerEvent, role: NodeRole): UIO[NodeRole] =
     (event match
       case ServerEvent.Timeout => timeout(role).map((ZIO.unit, _))
+
+
       case ServerEvent.RequestReceived(rv: RequestVote, respond) =>
         requestVote(rv, role).map((response, newRole) => (doRespond(response, respond), newRole))
+
+
+
+
       case ServerEvent.RequestReceived(ae: AppendEntries, respond) =>
         appendEntries(ae, role).map((response, newRole) => (doRespond(response, respond), newRole))
       case ServerEvent.RequestReceived(ne: NewEntry, respond) =>
         newEntry(ne, role).map((responsePromise, newRole) => (responsePromise.await.flatMap(doRespond(_, respond)).fork.unit, newRole))
+
+
+      case ServerEvent.RequestReceived(ne: NewEntryFromFollower, respond) => 
+        newEntryByFollower(NewEntry(ne.data), role).map((responsePromise, newRole) => (responsePromise.await.flatMap(doRespond( _, respond)).fork.unit, newRole))
+      
+      
+      
+      
       case ServerEvent.ResponseReceived(rvr: RequestVoteResponse)   => requestVoteResponse(rvr, role).map((ZIO.unit, _))
       case ServerEvent.ResponseReceived(aer: AppendEntriesResponse) => appendEntriesResponse(aer, role).map((ZIO.unit, _))
+      case ServerEvent.ResponseReceived(_: NewEntryFromFollowerResponse) => (newEntryByFollowerResponse(role).map((ZIO.unit, _)))
+
+
+
+
+
+
+
     ).flatMap((response, newRole) => persistAndRespond(response, role, newRole))
 
   private def timeout(role: NodeRole): UIO[NodeRole] =
@@ -80,6 +94,12 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
       )
     } yield NodeRole.Candidate(newState, CandidateState(1), newTimer)
 
+
+
+
+
+
+
   private def requestVote(rv: RequestVote, role: NodeRole): UIO[(RequestVoteResponse, NodeRole)] = role match
     case follower @ NodeRole.Follower(state, followerState, timer) =>
       // Reply false if term < currentTerm
@@ -94,6 +114,13 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
       }
     case candidate: NodeRole.Candidate => ZIO.succeed((RequestVoteResponse(candidate.state.currentTerm, voteGranted = false), candidate))
     case leader: NodeRole.Leader       => ZIO.succeed((RequestVoteResponse(leader.state.currentTerm, voteGranted = false), leader))
+
+
+
+
+
+
+
 
   @tailrec
   private def appendEntries(ae: AppendEntries, role: NodeRole): UIO[(AppendEntriesResponse, NodeRole)] = role match
@@ -126,17 +153,45 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
 
     case leader: NodeRole.Leader => ZIO.succeed((AppendEntriesResponse.to(nodeId, ae)(leader.state.currentTerm, success = false), leader))
 
+
+
+  private def newEntryByFollower(ne: NewEntry, role: NodeRole): UIO[(Promise[Nothing, NewEntryFromFollowerResponse], NodeRole)] =
+    role match
+      case NodeRole.Follower(state, _, _) => 
+        for {
+          p <- Promise.make[Nothing, NewEntryFromFollowerResponse]
+          _ <- p.succeed(NewEntryFromFollowerResponse(state.currentTerm, success = false))
+        } yield (p, role)
+      case NodeRole.Candidate(state, _, _) => 
+        for {
+          p <- Promise.make[Nothing, NewEntryFromFollowerResponse]
+          _ <- p.succeed(NewEntryFromFollowerResponse(state.currentTerm, success = false))
+        } yield (p, role)
+      // If command received from client: append entry to local log
+      case NodeRole.Leader(state, leaderState, timer)  =>
+        for {
+          p <- Promise.make[Nothing, NewEntryFromFollowerResponse]
+          newState = state.appendEntry(LogEntry(ne.data, state.currentTerm))
+          newLeaderState = leaderState.addAwaitingResponse(
+            LogIndex(state.log.length - 1),
+            p.succeed(NewEntryFromFollowerResponse(state.currentTerm, success = true)).unit
+          )
+          newTimer <- sendAppendEntries(newState, newLeaderState, timer)
+        } yield (p, NodeRole.Leader(newState, newLeaderState, newTimer))
+
+
   private def newEntry(ne: NewEntry, role: NodeRole): UIO[(Promise[Nothing, NewEntryAddedResponse], NodeRole)] =
-    def redirectToLeader(leaderId: Option[NodeId]) = for {
+    def redirectToLeader(leaderId: Option[NodeId], term: Term) = for {
       p <- Promise.make[Nothing, NewEntryAddedResponse]
+      _ <- doSend(leaderId.getOrElse(NodeId(1)), NewEntryFromFollower(ne.data, term))
       _ <- p.succeed(RedirectToLeaderResponse(leaderId))
     } yield (p, role)
 
     role match
-      case NodeRole.Follower(_, FollowerState(leaderId), _) => redirectToLeader(leaderId)
-      case _: NodeRole.Candidate                            => redirectToLeader(None)
+      case NodeRole.Follower(state, FollowerState(leaderId), _) => redirectToLeader(leaderId, state.currentTerm)
+      case _: NodeRole.Candidate                            => redirectToLeader(None, Term(0))
       // If command received from client: append entry to local log
-      case NodeRole.Leader(state, leaderState, timer) =>
+      case NodeRole.Leader(state, leaderState, timer)  =>
         for {
           p <- Promise.make[Nothing, NewEntryAddedResponse]
           newState = state.appendEntry(LogEntry(ne.data, state.currentTerm))
@@ -146,6 +201,17 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
           )
           newTimer <- sendAppendEntries(newState, newLeaderState, timer)
         } yield (p, NodeRole.Leader(newState, newLeaderState, newTimer))
+
+
+
+
+
+
+
+
+
+
+
 
   private def requestVoteResponse(rvr: RequestVoteResponse, role: NodeRole): UIO[NodeRole] = role match
     case follower: NodeRole.Follower => ZIO.succeed(follower) // ignore
@@ -157,6 +223,21 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
       else ZIO.succeed(NodeRole.Candidate(state, newCandidateState, timer))
     case candidate: NodeRole.Candidate => ZIO.succeed(candidate)
     case leader: NodeRole.Leader       => ZIO.succeed(leader)
+
+
+
+
+  private def newEntryByFollowerResponse(role: NodeRole): UIO[NodeRole] = role match
+    case follower: NodeRole.Follower => ZIO.succeed(follower) 
+    case candidate: NodeRole.Candidate => ZIO.succeed(candidate)
+    case leader: NodeRole.Leader       => ZIO.succeed(leader)
+
+
+
+
+
+
+
 
   private def startLeader(state: ServerState, timer: Timer): UIO[NodeRole] = {
     val leaderState = LeaderState(
@@ -173,6 +254,11 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
       newTimer <- sendAppendEntries(state, leaderState, timer)
     } yield NodeRole.Leader(state, leaderState, newTimer)
   }
+
+
+
+
+
 
   def appendEntriesResponse(aer: AppendEntriesResponse, role: NodeRole): UIO[NodeRole] = role match
     case follower: NodeRole.Follower   => ZIO.succeed(follower)
@@ -248,18 +334,3 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
       case _: NodeRole.Leader    => setRoleLogAnnotation("leader")
 }
 
-/** @param currentTimer
-  *   The currently running timer - a fiber, which eventually adds a [[Timeout]] event using [[comms.add]]. That fiber can be interrupted to
-  *   cancel the timer.
-  */
-private class Timer(conf: Conf, comms: Comms, currentTimer: Fiber.Runtime[Nothing, Unit]):
-  private def restart(timeout: UIO[ServerEvent.Timeout.type]): UIO[Timer] =
-    for {
-      _ <- currentTimer.interrupt
-      newFiber <- timeout.flatMap(comms.add).fork
-    } yield new Timer(conf, comms, newFiber)
-  def restartElection: UIO[Timer] = restart(conf.electionTimeout)
-  def restartHeartbeat: UIO[Timer] = restart(conf.heartbeatTimeout)
-
-private object Timer:
-  def apply(conf: Conf, comms: Comms): UIO[Timer] = ZIO.never.fork.map(new Timer(conf, comms, _))

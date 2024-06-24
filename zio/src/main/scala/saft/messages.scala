@@ -1,5 +1,6 @@
 package saft
 
+
 /** Base trait for messages that are sent between servers and clients. Messages are be classified:
   *
   *   - basing on the recipient (whether the message is sent '''to''' a server or a client)
@@ -55,6 +56,9 @@ object AppendEntriesResponse:
     AppendEntriesResponse(term, success, followerId, appendEntries.prevLog, appendEntries.entries.length)
 
 case class NewEntry(data: LogData) extends RequestMessage
+
+case class NewEntryFromFollower(data: LogData, term: Term) extends RequestMessage with FromServerMessage
+case class NewEntryFromFollowerResponse(term: Term, success: Boolean) extends ResponseMessage with ToServerMessage with FromServerMessage
 
 sealed trait NewEntryAddedResponse extends ToClientMessage
 
